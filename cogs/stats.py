@@ -1,8 +1,7 @@
-from discord.ext import commands, tasks
+from discord.ext import commands, tasks, menus
 from collections import Counter, defaultdict
 
 from .utils import checks, db, time, formats
-from .utils.paginator import CannotPaginate
 
 import pkg_resources
 import logging
@@ -91,7 +90,7 @@ class Stats(commands.Cog):
 
     def cog_unload(self):
         self.bulk_insert_loop.stop()
-        self._gateway_worker.cancel()
+        self.gateway_worker.cancel()
 
     @tasks.loop(seconds=10.0)
     async def bulk_insert_loop(self):
@@ -138,7 +137,7 @@ class Stats(commands.Cog):
     async def on_socket_response(self, msg):
         self.bot.socket_stats[msg.get('t')] += 1
 
-    @property
+    @discord.utils.cached_property
     def webhook(self):
         wh_id, wh_token = self.bot.config.stat_webhook
         hook = discord.Webhook.partial(id=wh_id, token=wh_token, adapter=discord.AsyncWebhookAdapter(self.bot.session))
@@ -229,13 +228,6 @@ class Stats(commands.Cog):
 
         # statistics
         total_members = 0
-        total_online = 0
-        offline = discord.Status.offline
-        for member in self.bot.get_all_members():
-            total_members += 1
-            if member.status is not offline:
-                total_online += 1
-
         total_unique = len(self.bot.users)
 
         text = 0
@@ -243,13 +235,14 @@ class Stats(commands.Cog):
         guilds = 0
         for guild in self.bot.guilds:
             guilds += 1
+            total_members += guild.member_count
             for channel in guild.channels:
                 if isinstance(channel, discord.TextChannel):
                     text += 1
                 elif isinstance(channel, discord.VoiceChannel):
                     voice += 1
 
-        embed.add_field(name='Members', value=f'{total_members} total\n{total_unique} unique\n{total_online} unique online')
+        embed.add_field(name='Members', value=f'{total_members} total\n{total_unique} unique')
         embed.add_field(name='Channels', value=f'{text + voice} total\n{text} text\n{voice} voice')
 
         memory_usage = self.process.memory_full_info().uss / 1024**2
@@ -611,7 +604,7 @@ class Stats(commands.Cog):
             return
 
         error = error.original
-        if isinstance(error, (discord.Forbidden, discord.NotFound, CannotPaginate)):
+        if isinstance(error, (discord.Forbidden, discord.NotFound, menus.MenuError)):
             return
 
         e = discord.Embed(title='Command Error', colour=0xcc3366)
@@ -643,7 +636,7 @@ class Stats(commands.Cog):
 
         emoji = attributes.get(record.levelname, '\N{CROSS MARK}')
         dt = datetime.datetime.utcfromtimestamp(record.created)
-        msg = f'{emoji} `[{dt:%Y-%m-%d %H:%M:%S}] {record.message}`'
+        msg = textwrap.shorten(f'{emoji} `[{dt:%Y-%m-%d %H:%M:%S}] {record.message}`', width=1990)
         await self.webhook.send(msg, username='Gateway', avatar_url='https://i.imgur.com/4PnCKB3.png')
 
     @commands.command(hidden=True)
@@ -779,16 +772,16 @@ class Stats(commands.Cog):
             # Shard WS closed
             # Shard Task failure
             # Shard Task complete (no failure)
-            if shard._task.done():
-                exc = shard._task.exception()
+            if shard.is_closed():
+                badge = '<:offline:316856575501402112>'
+                issues += 1
+            elif shard._parent._task.done():
+                exc = shard._parent._task.exception()
                 if exc is not None:
                     badge = '\N{FIRE}'
                     issues += 1
                 else:
                     badge = '\U0001f504'
-            elif not shard.ws.open:
-                badge = '<:offline:316856575501402112>'
-                issues += 1
 
             if badge is None:
                 badge = '<:online:316856575413321728>'

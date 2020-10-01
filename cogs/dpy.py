@@ -1,9 +1,11 @@
-from discord.ext import commands
+from discord.ext import commands, menus
 from cogs.utils.formats import human_join
-from cogs.utils.paginator import FieldPages
+from cogs.utils.paginator import FieldPageSource, RoboPages
+import binascii
 import discord
 import asyncio
 import typing
+import base64
 import yarl
 import re
 
@@ -13,6 +15,7 @@ DISCORD_PY_REWRITE_ROLE = 381981861041143808
 DISCORD_PY_TESTER_ROLE = 669155135829835787
 DISCORD_PY_JP_ROLE = 490286873311182850
 DISCORD_PY_PROF_ROLE = 381978395270971407
+DISCORD_PY_HELP_CHANNELS = (381965515721146390, 564950631455129636, 490289254757564426, 738572311107469354)
 
 DISCORD_BOT_BLOG = 'https://blog.discord.com/the-future-of-bots-on-discord-4e6e050ab52e'
 DISCORD_BOT_BLOG_RESPONSE = f"""Hello! It seems you've sent a message involving <{DISCORD_BOT_BLOG}>.
@@ -30,6 +33,18 @@ Thank you for understanding!
 GITHUB_TODO_COLUMN = 9341868
 GITHUB_PROGRESS_COLUMN = 9341869
 GITHUB_DONE_COLUMN = 9341870
+
+TOKEN_REGEX = re.compile(r'[a-zA-Z0-9_-]{23,28}\.[a-zA-Z0-9_-]{6,7}\.[a-zA-Z0-9_-]{27}')
+
+def validate_token(token):
+    try:
+        # Just check if the first part validates as a user ID
+        (user_id, _, _) = token.split('.')
+        user_id = int(base64.b64decode(user_id, validate=True))
+    except (ValueError, binascii.Error):
+        return False
+    else:
+        return True
 
 class GithubError(commands.CommandError):
     pass
@@ -113,6 +128,27 @@ class DPYExclusive(commands.Cog, name='discord.py'):
             if self._req_lock.locked():
                 self._req_lock.release()
 
+    async def create_gist(self, content, *, description=None, filename=None, public=True):
+        headers = {
+            'Accept': 'application/vnd.github.v3+json',
+        }
+
+        filename = filename or 'output.txt'
+        data = {
+            'public': public,
+            'files': {
+                filename: {
+                    'content': content
+                }
+            }
+        }
+
+        if description:
+            data['description'] = description
+
+        js = await self.github_request('POST', 'gists', data=data, headers=headers)
+        return js['html_url']
+
     @commands.Cog.listener()
     async def on_member_join(self, member):
         if member.guild.id != DISCORD_PY_GUILD_ID:
@@ -129,10 +165,35 @@ class DPYExclusive(commands.Cog, name='discord.py'):
                 await member.add_roles(discord.Object(id=DISCORD_PY_JP_ROLE))
             self._invite_cache[invite.code] = invite.uses
 
+    async def redirect_attachments(self, message):
+        attachment = message.attachments[0]
+        if not attachment.filename.endswith(('.txt', '.py', '.json')):
+            return
+
+        # If this file is more than 2MiB then it's definitely too big
+        if attachment.size > (2 * 1024 * 1024):
+            return
+
+        try:
+            contents = await attachment.read()
+            contents = contents.decode('utf-8')
+        except (UnicodeDecodeError, discord.HTTPException):
+            return
+
+        description = f'A file by {message.author} in the discord.py guild'
+        gist = await self.create_gist(contents, description=description, filename=attachment.filename)
+        await message.channel.send(f'File automatically uploaded to gist: <{gist}>')
+
     @commands.Cog.listener()
     async def on_message(self, message):
         if not message.guild or message.guild.id != DISCORD_PY_GUILD_ID:
             return
+
+        tokens = [token for token in TOKEN_REGEX.findall(message.content) if validate_token(token)]
+        if tokens and message.author.id != self.bot.user.id:
+            url =  await self.create_gist('\n'.join(tokens), description='Discord tokens detected')
+            msg = f'{message.author.mention}, I have found tokens and sent them to <{url}> to be invalidated for you.'
+            return await message.channel.send(msg)
 
         if message.author.bot:
             return
@@ -146,6 +207,9 @@ class DPYExclusive(commands.Cog, name='discord.py'):
                 pass
             finally:
                 return
+
+        if message.channel.id in DISCORD_PY_HELP_CHANNELS and len(message.attachments) == 1:
+            return await self.redirect_attachments(message)
 
         # Handle some #emoji-suggestions auto moderator and things
         # Process is mainly informal anyway
@@ -275,11 +339,11 @@ class DPYExclusive(commands.Cog, name='discord.py'):
         if progress:
             todos.extend(progress)
 
+        source = FieldPageSource(todos, per_page=8)
+        source.embed.colour = 0x28A745
         try:
-            p = FieldPages(ctx, entries=todos, per_page=8)
-            p.embed.colour = 0x28A745
-            await p.paginate()
-        except Exception as e:
+            await RoboPages(source).start(ctx)
+        except menus.MenuError as e:
             await ctx.send(e)
 
     @github_todo.command(name='create')
@@ -320,7 +384,7 @@ class DPYExclusive(commands.Cog, name='discord.py'):
     @commands.is_owner()
     async def emojipost(self, ctx):
         """Fancy post the emoji lists"""
-        emojis = sorted([e for e in ctx.guild.emojis if len(e.roles) == 0 and e.available], key=lambda e: e.name)
+        emojis = sorted([e for e in ctx.guild.emojis if len(e.roles) == 0 and e.available], key=lambda e: e.name.lower())
         paginator = commands.Paginator(suffix='', prefix='')
         channel = ctx.guild.get_channel(596549678393327616)
 

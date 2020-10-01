@@ -16,7 +16,8 @@ CONTRIBUTORS_ROLE = 111173097888993280
 DISCORD_PY_ID     = 84319995256905728
 DISCORD_PY_GUILD  = 336642139381301249
 DISCORD_PY_PROF_ROLE = 381978395270971407
-DISCORD_PY_HELP_CHANNELS = (381965515721146390, 564950631455129636)
+DISCORD_PY_HELPER_ROLE = 558559632637952010
+DISCORD_PY_HELP_CHANNELS = (381965515721146390, 564950631455129636, 738572311107469354)
 BOT_LIST_INFO = {
     DISCORD_API_ID: {
         'channel':580184108794380298,
@@ -57,7 +58,8 @@ def can_use_block():
             guild_level = ctx.author.guild_permissions
             return guild_level.manage_roles or (
                 ctx.channel.id in DISCORD_PY_HELP_CHANNELS and
-                any(r.id == DISCORD_PY_PROF_ROLE for r in ctx.author.roles)
+                (ctx.author._roles.has(DISCORD_PY_PROF_ROLE) or
+                 ctx.author._roles.has(DISCORD_PY_HELPER_ROLE))
             )
         return False
     return commands.check(predicate)
@@ -149,51 +151,6 @@ class API(commands.Cog):
         if member.bot:
             role = discord.Object(id=USER_BOTS_ROLE)
             await member.add_roles(role)
-
-    @commands.Cog.listener()
-    async def on_message(self, message):
-        channel = message.channel
-        author = message.author
-
-        if channel.id != DISCORD_PY_ID:
-            return
-
-        if author.status is discord.Status.offline:
-            fmt = f'{author.mention} has been blocked for being invisible until they change their status or for 5 minutes.'
-
-            try:
-                await channel.set_permissions(author, read_messages=False, reason='invisible block')
-                self._recently_blocked.add(author.id)
-                await channel.send(fmt)
-                msg = f'Heya. You have been automatically blocked from <#{DISCORD_PY_ID}> for 5 minutes for being ' \
-                       'invisible.\nTry chatting again in 5 minutes or when you change your status. If you\'re curious ' \
-                       'why invisible users are blocked, it is because they tend to break the client and cause them to ' \
-                       'be hard to mention. Since we want to help you usually, we expect mentions to work without ' \
-                       'headaches.\n\nSorry for the trouble.'
-                await author.send(msg)
-            except discord.HTTPException:
-                pass
-
-            await asyncio.sleep(300)
-            self._recently_blocked.discard(author.id)
-            await channel.set_permissions(author, overwrite=None, reason='invisible unblock')
-            return
-
-        m = self.issue.search(message.content)
-        if m is not None:
-            url = 'https://github.com/Rapptz/discord.py/issues/'
-            await channel.send(url + m.group('number'))
-
-    @commands.Cog.listener()
-    async def on_member_update(self, before, after):
-        if after.guild.id != DISCORD_API_ID:
-            return
-
-        if before.status is discord.Status.offline and after.status is not discord.Status.offline:
-            if after.id in self._recently_blocked:
-                self._recently_blocked.discard(after.id)
-                channel = after.guild.get_channel(DISCORD_PY_ID)
-                await channel.set_permissions(after, overwrite=None, reason='invisible unblock')
 
     def parse_object_inv(self, stream, url):
         # key: URL
@@ -408,6 +365,9 @@ class API(commands.Cog):
     async def block(self, ctx, *, member: discord.Member):
         """Blocks a user from your channel."""
 
+        if member.top_role > ctx.author.top_role:
+            return
+
         reason = f'Block by {ctx.author} (ID: {ctx.author.id})'
 
         channels = self.get_block_channels(ctx.guild, ctx.channel)
@@ -431,6 +391,9 @@ class API(commands.Cog):
 
         Note that times are in UTC.
         """
+
+        if member.top_role > ctx.author.top_role:
+            return
 
         reminder = self.bot.get_cog('Reminder')
         if reminder is None:
@@ -652,7 +615,8 @@ class API(commands.Cog):
         await role.edit(mentionable=True)
 
         # then send the message..
-        await ctx.send(f'{role.mention}: {content}'[:2000])
+        mentions = discord.AllowedMentions(roles=[role])
+        await ctx.send(f'{role.mention}: {content}'[:2000], allowed_mentions=mentions)
 
         # then make the role unmentionable
         await role.edit(mentionable=False)
